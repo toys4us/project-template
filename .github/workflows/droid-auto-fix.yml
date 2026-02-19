@@ -1,7 +1,7 @@
 name: Droid Auto-Fix Issues
 on:
   issues:
-    types: [opened, labeled]
+    types: [labeled]
 
 jobs:
   fix-issue:
