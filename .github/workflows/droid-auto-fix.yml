@@ -22,7 +22,7 @@ jobs:
           curl -fsSL https://app.factory.ai/cli | sh
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: Fix issue and create PR
+      - name: Analyze and fix issue
         env:
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -34,6 +34,76 @@ jobs:
           ISSUE_EOF
           )
 
+          # Step 1: Analyze - is this a real bug or user error?
+          droid exec --auto low -o json "
+          Analyze this issue report for the codebase:
+          Title: ${ISSUE_TITLE}
+          Description: ${ISSUE_BODY}
+
+          Investigate the codebase and determine:
+          1. Is this a real bug in the code?
+          2. Is this user error or misconfiguration?
+          3. Is this expected behavior?
+          4. Is there not enough information to determine?
+
+          Write your verdict to analysis.json with this exact format:
+          {
+            \"verdict\": \"bug\" or \"user_error\" or \"expected_behavior\" or \"needs_info\",
+            \"explanation\": \"clear explanation of your finding\"
+          }
+          " > /dev/null 2>&1
+
+          if [ ! -f analysis.json ]; then
+            echo '{"verdict":"bug","explanation":"Could not complete analysis, attempting fix."}' > analysis.json
+          fi
+
+          VERDICT=$(cat analysis.json | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','bug'))" 2>/dev/null || echo "bug")
+          EXPLANATION=$(cat analysis.json | python3 -c "import sys,json; print(json.load(sys.stdin).get('explanation',''))" 2>/dev/null || echo "")
+
+          # Step 2: Handle based on verdict
+          case "$VERDICT" in
+            user_error)
+              gh issue comment "$ISSUE_NUMBER" \
+                --body "## Analysis: User Error
+
+          ${EXPLANATION}
+
+          This doesn't appear to be a bug in the code. If you believe this is incorrect, please provide more details and reopen."
+              gh issue close "$ISSUE_NUMBER"
+              gh issue edit "$ISSUE_NUMBER" --add-label "wontfix"
+              exit 0
+              ;;
+
+            expected_behavior)
+              gh issue comment "$ISSUE_NUMBER" \
+                --body "## Analysis: Expected Behavior
+
+          ${EXPLANATION}
+
+          This is working as intended. If you'd like this behavior changed, please open a feature request instead."
+              gh issue close "$ISSUE_NUMBER"
+              gh issue edit "$ISSUE_NUMBER" --add-label "wontfix"
+              exit 0
+              ;;
+
+            needs_info)
+              gh issue comment "$ISSUE_NUMBER" \
+                --body "## Analysis: More Information Needed
+
+          ${EXPLANATION}
+
+          Could you provide more details so I can investigate further? Once updated, add the \`droid\` label again to retrigger."
+              gh issue edit "$ISSUE_NUMBER" --add-label "needs-info"
+              gh issue edit "$ISSUE_NUMBER" --remove-label "droid"
+              exit 0
+              ;;
+
+            bug|*)
+              # Continue to fix
+              ;;
+          esac
+
+          # Step 3: Fix the bug
           BRANCH="droid/fix-issue-${ISSUE_NUMBER}"
           git checkout -b "$BRANCH"
 
@@ -41,13 +111,16 @@ jobs:
           You are working on issue #${ISSUE_NUMBER}.
           Title: ${ISSUE_TITLE}
           Description: ${ISSUE_BODY}
+          Analysis: ${EXPLANATION}
 
-          1. Analyze the issue and understand what needs to be fixed
-          2. Implement the fix
-          3. Make sure the code compiles/runs correctly
-          4. Commit your changes with a descriptive message referencing issue #${ISSUE_NUMBER}
+          This has been confirmed as a real bug. Fix it:
+          1. Implement the fix
+          2. Make sure the code compiles/runs correctly
+          3. Run any existing tests to verify nothing is broken
+          4. Do NOT commit - the workflow handles that
           "
 
+          # Step 4: Create PR or report failure
           if [ -n "$(git status --porcelain)" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -59,17 +132,29 @@ jobs:
 
             gh pr create \
               --title "fix: resolve issue #${ISSUE_NUMBER} - ${ISSUE_TITLE}" \
-              --body "Automated fix for #${ISSUE_NUMBER}
+              --body "## Automated fix for #${ISSUE_NUMBER}
 
-              ## What was done
-              Droid analyzed and implemented a fix for this issue.
-              Please review the changes before merging." \
+          ### Analysis
+          ${EXPLANATION}
+
+          ### What was done
+          Droid confirmed this is a bug and implemented a fix.
+          Please review the changes before merging." \
               --base main \
               --head "$BRANCH"
 
             gh issue comment "$ISSUE_NUMBER" \
-              --body "I've created a PR with a fix for this issue. Please review it."
+              --body "## Bug Confirmed & Fix Ready
+
+          ${EXPLANATION}
+
+          I've created a PR with a fix. Please review and merge when ready."
           else
             gh issue comment "$ISSUE_NUMBER" \
-              --body "I analyzed this issue but couldn't determine an automated fix. A human should take a look."
+              --body "## Bug Confirmed but Fix Failed
+
+          ${EXPLANATION}
+
+          I confirmed this is a bug but couldn't produce a working fix. A human should take a look."
+            gh issue edit "$ISSUE_NUMBER" --add-label "help-wanted"
           fi
