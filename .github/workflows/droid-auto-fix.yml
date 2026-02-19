@@ -1,11 +1,15 @@
 name: Droid Auto-Fix Issues
 on:
   issues:
-    types: [labeled]
+    types: [opened, reopened]
+  issue_comment:
+    types: [created]
 
 jobs:
   fix-issue:
-    if: contains(github.event.issue.labels.*.name, 'droid')
+    if: >
+      (github.event_name == 'issues') ||
+      (github.event_name == 'issue_comment' && !contains(github.event.comment.user.login, '[bot]'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -27,28 +31,49 @@ jobs:
           FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ISSUE_NUMBER="${{ github.event.issue.number }}"
-          ISSUE_TITLE="${{ github.event.issue.title }}"
-          ISSUE_BODY=$(cat <<'ISSUE_EOF'
+          # Determine issue number and content based on event type
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            ISSUE_NUMBER="${{ github.event.issue.number }}"
+            ISSUE_TITLE="${{ github.event.issue.title }}"
+            ISSUE_BODY=$(cat <<'ISSUE_EOF'
           ${{ github.event.issue.body }}
           ISSUE_EOF
-          )
+            )
+            COMMENT_BODY=$(cat <<'COMMENT_EOF'
+          ${{ github.event.comment.body }}
+          COMMENT_EOF
+            )
+            CONTEXT="Original issue: ${ISSUE_TITLE}
+          ${ISSUE_BODY}
+
+          New comment/update from user:
+          ${COMMENT_BODY}"
+          else
+            ISSUE_NUMBER="${{ github.event.issue.number }}"
+            ISSUE_TITLE="${{ github.event.issue.title }}"
+            ISSUE_BODY=$(cat <<'ISSUE_EOF'
+          ${{ github.event.issue.body }}
+          ISSUE_EOF
+            )
+            CONTEXT="Title: ${ISSUE_TITLE}
+          Description: ${ISSUE_BODY}"
+          fi
 
           # Step 1: Analyze - is this a real bug or user error?
           droid exec --auto low -o json "
           Analyze this issue report for the codebase:
-          Title: ${ISSUE_TITLE}
-          Description: ${ISSUE_BODY}
+          ${CONTEXT}
 
           Investigate the codebase and determine:
           1. Is this a real bug in the code?
           2. Is this user error or misconfiguration?
           3. Is this expected behavior?
-          4. Is there not enough information to determine?
+          4. Is this a feature request?
+          5. Is there not enough information to determine?
 
           Write your verdict to analysis.json with this exact format:
           {
-            \"verdict\": \"bug\" or \"user_error\" or \"expected_behavior\" or \"needs_info\",
+            \"verdict\": \"bug\" or \"user_error\" or \"expected_behavior\" or \"feature_request\" or \"needs_info\",
             \"explanation\": \"clear explanation of your finding\"
           }
           " > /dev/null 2>&1
@@ -68,9 +93,7 @@ jobs:
 
           ${EXPLANATION}
 
-          This doesn't appear to be a bug in the code. If you believe this is incorrect, please provide more details and reopen."
-              gh issue close "$ISSUE_NUMBER"
-              gh issue edit "$ISSUE_NUMBER" --add-label "wontfix"
+          This doesn't appear to be a bug in the code. If you believe this is incorrect, please provide more details."
               exit 0
               ;;
 
@@ -81,9 +104,16 @@ jobs:
           ${EXPLANATION}
 
           This is working as intended. If you'd like this behavior changed, please open a feature request instead."
-              gh issue close "$ISSUE_NUMBER"
-              gh issue edit "$ISSUE_NUMBER" --add-label "wontfix"
               exit 0
+              ;;
+
+            feature_request)
+              gh issue comment "$ISSUE_NUMBER" \
+                --body "## Analysis: Feature Request
+
+          ${EXPLANATION}
+
+          This is a feature request, not a bug. I'll attempt to implement it."
               ;;
 
             needs_info)
@@ -92,9 +122,13 @@ jobs:
 
           ${EXPLANATION}
 
-          Could you provide more details so I can investigate further? Once updated, add the \`droid\` label again to retrigger."
+          Could you provide more details? Specifically:
+          1. What behavior did you expect?
+          2. What actually happened?
+          3. Steps to reproduce the problem.
+
+          Reply to this issue and I'll re-analyze automatically."
               gh issue edit "$ISSUE_NUMBER" --add-label "needs-info"
-              gh issue edit "$ISSUE_NUMBER" --remove-label "droid"
               exit 0
               ;;
 
@@ -103,18 +137,25 @@ jobs:
               ;;
           esac
 
-          # Step 3: Fix the bug
+          # Step 3: Fix the bug / implement the feature
           BRANCH="droid/fix-issue-${ISSUE_NUMBER}"
-          git checkout -b "$BRANCH"
+
+          # Check if branch already exists (from a previous attempt)
+          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+            git fetch origin "$BRANCH"
+            git checkout "$BRANCH"
+            git merge main --no-edit || true
+          else
+            git checkout -b "$BRANCH"
+          fi
 
           droid exec --auto high "
           You are working on issue #${ISSUE_NUMBER}.
-          Title: ${ISSUE_TITLE}
-          Description: ${ISSUE_BODY}
+          ${CONTEXT}
           Analysis: ${EXPLANATION}
 
-          This has been confirmed as a real bug. Fix it:
-          1. Implement the fix
+          Fix this issue:
+          1. Implement the fix or feature
           2. Make sure the code compiles/runs correctly
           3. Run any existing tests to verify nothing is broken
           4. Do NOT commit - the workflow handles that
@@ -130,31 +171,40 @@ jobs:
             Co-authored-by: factory-droid[bot] <138933559+factory-droid[bot]@users.noreply.github.com>"
             git push origin "$BRANCH"
 
-            gh pr create \
-              --title "fix: resolve issue #${ISSUE_NUMBER} - ${ISSUE_TITLE}" \
-              --body "## Automated fix for #${ISSUE_NUMBER}
+            # Only create PR if one doesn't exist yet
+            EXISTING_PR=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || echo "")
+            if [ -z "$EXISTING_PR" ]; then
+              gh pr create \
+                --title "fix: resolve issue #${ISSUE_NUMBER} - ${ISSUE_TITLE}" \
+                --body "## Automated fix for #${ISSUE_NUMBER}
 
           ### Analysis
           ${EXPLANATION}
 
           ### What was done
-          Droid confirmed this is a bug and implemented a fix.
+          Droid analyzed and implemented a fix for this issue.
           Please review the changes before merging." \
-              --base main \
-              --head "$BRANCH"
+                --base main \
+                --head "$BRANCH"
 
-            gh issue comment "$ISSUE_NUMBER" \
-              --body "## Bug Confirmed & Fix Ready
+              gh issue comment "$ISSUE_NUMBER" \
+                --body "## Fix Ready
 
           ${EXPLANATION}
 
           I've created a PR with a fix. Please review and merge when ready."
+            else
+              gh issue comment "$ISSUE_NUMBER" \
+                --body "## PR Updated
+
+          I've pushed additional changes to PR #${EXISTING_PR} based on the latest feedback."
+            fi
           else
             gh issue comment "$ISSUE_NUMBER" \
-              --body "## Bug Confirmed but Fix Failed
+              --body "## Could Not Fix
 
           ${EXPLANATION}
 
-          I confirmed this is a bug but couldn't produce a working fix. A human should take a look."
+          I analyzed this but couldn't produce a working fix. A human should take a look."
             gh issue edit "$ISSUE_NUMBER" --add-label "help-wanted"
           fi
