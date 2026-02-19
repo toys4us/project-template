@@ -1,0 +1,75 @@
+name: Droid Auto-Fix Issues
+on:
+  issues:
+    types: [opened, labeled]
+
+jobs:
+  fix-issue:
+    if: contains(github.event.issue.labels.*.name, 'droid')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Droid CLI
+        run: |
+          curl -fsSL https://app.factory.ai/cli | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Fix issue and create PR
+        env:
+          FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+          ISSUE_BODY=$(cat <<'ISSUE_EOF'
+          ${{ github.event.issue.body }}
+          ISSUE_EOF
+          )
+
+          BRANCH="droid/fix-issue-${ISSUE_NUMBER}"
+          git checkout -b "$BRANCH"
+
+          droid exec --auto high "
+          You are working on issue #${ISSUE_NUMBER}.
+          Title: ${ISSUE_TITLE}
+          Description: ${ISSUE_BODY}
+
+          1. Analyze the issue and understand what needs to be fixed
+          2. Implement the fix
+          3. Make sure the code compiles/runs correctly
+          4. Commit your changes with a descriptive message referencing issue #${ISSUE_NUMBER}
+          "
+
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "fix: resolve issue #${ISSUE_NUMBER} - ${ISSUE_TITLE}
+
+            Co-authored-by: factory-droid[bot] <138933559+factory-droid[bot]@users.noreply.github.com>"
+            git push origin "$BRANCH"
+
+            gh pr create \
+              --title "fix: resolve issue #${ISSUE_NUMBER} - ${ISSUE_TITLE}" \
+              --body "Automated fix for #${ISSUE_NUMBER}
+
+              ## What was done
+              Droid analyzed and implemented a fix for this issue.
+              Please review the changes before merging." \
+              --base main \
+              --head "$BRANCH"
+
+            gh issue comment "$ISSUE_NUMBER" \
+              --body "I've created a PR with a fix for this issue. Please review it."
+          else
+            gh issue comment "$ISSUE_NUMBER" \
+              --body "I analyzed this issue but couldn't determine an automated fix. A human should take a look."
+          fi
