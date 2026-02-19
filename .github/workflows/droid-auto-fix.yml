@@ -93,7 +93,8 @@ jobs:
 
           ${EXPLANATION}
 
-          This doesn't appear to be a bug in the code. If you believe this is incorrect, please provide more details."
+          This doesn't appear to be a bug in the code. If you believe this is incorrect, reopen the issue with more details."
+              gh issue close "$ISSUE_NUMBER"
               exit 0
               ;;
 
@@ -103,7 +104,8 @@ jobs:
 
           ${EXPLANATION}
 
-          This is working as intended. If you'd like this behavior changed, please open a feature request instead."
+          This is working as intended. If you'd like this behavior changed, reopen with a feature request."
+              gh issue close "$ISSUE_NUMBER"
               exit 0
               ;;
 
@@ -192,12 +194,14 @@ jobs:
 
           ${EXPLANATION}
 
-          I've created a PR with a fix. Please review and merge when ready."
+          I've created a PR with a fix. Please review and merge. Closing this issue -- reopen if the fix isn't satisfactory."
+              gh issue close "$ISSUE_NUMBER"
             else
               gh issue comment "$ISSUE_NUMBER" \
                 --body "## PR Updated
 
-          I've pushed additional changes to PR #${EXISTING_PR} based on the latest feedback."
+          I've pushed additional changes to PR #${EXISTING_PR} based on the latest feedback. Closing this issue -- reopen if needed."
+              gh issue close "$ISSUE_NUMBER"
             fi
           else
             gh issue comment "$ISSUE_NUMBER" \
